@@ -51,6 +51,15 @@ export interface DecideInput {
 // Prioridade no desempate de horário idêntico: maior vence.
 const TYPE_RANK: Record<TouchType, number> = { referral: 2, campaign: 1 };
 
+/** Motivo de um duplicado; cita se type/ref divergiram do registro canônico. */
+export function duplicateReason(clickId: string, canonical: { type: string; ref: string } | undefined, t: { type: string; ref: string }): string {
+  const base = `click_id ${clickId} repetido; só o registro de touched_at mais antigo conta`;
+  if (canonical && (canonical.type !== t.type || canonical.ref !== t.ref)) {
+    return `${base}; type/ref divergiu do canônico (${t.type}/${t.ref} em vez de ${canonical.type}/${canonical.ref})`;
+  }
+  return base;
+}
+
 const iso = (ms: number) => new Date(ms).toISOString();
 
 // Ordem de preferência entre toques válidos: mais recente, depois tipo, depois click_id menor.
@@ -70,7 +79,7 @@ export function decideAttribution(input: DecideInput): Decision {
       windowEndsAt: null, validUntil: null,
       touches: ordered.map((t) => ({
         ...t, outcome: t.duplicate ? "duplicate" : "before_first_open",
-        reason: t.duplicate ? "click_id repetido" : "dispositivo sem primeira abertura registrada",
+        reason: t.duplicate ? "click_id repetido; só o registro de touched_at mais antigo conta" : "dispositivo sem primeira abertura registrada",
       })),
     };
   }
@@ -80,7 +89,8 @@ export function decideAttribution(input: DecideInput): Decision {
 
   const audited: TouchAudit[] = ordered.map((t) => {
     if (t.duplicate) {
-      return { ...t, outcome: "duplicate", reason: `click_id ${t.clickId} repetido; só o primeiro registro conta` };
+      const canonical = input.touches.find((c) => !c.duplicate && c.clickId === t.clickId);
+      return { ...t, outcome: "duplicate", reason: duplicateReason(t.clickId, canonical, t) };
     }
     if (t.touchedAt < firstOpenAt) {
       return { ...t, outcome: "before_first_open", reason: `toque ${iso(t.touchedAt)} anterior à primeira abertura ${iso(firstOpenAt)}` };

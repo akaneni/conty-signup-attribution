@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { decideAttribution, type Decision, type TouchInput } from "./attribution.ts";
+import { decideAttribution, duplicateReason, type Decision, type TouchInput } from "./attribution.ts";
 import {
   getFirstOpen, getSignup, listLateTouches, getSignupByDevice, insertDevice, insertSignup, listTouches, recordTouch,
   type Db, type LateTouch, type StoredTouch,
@@ -74,7 +74,7 @@ function lateAudit(signedUpAt: string, late: LateTouch[]) {
   return late.map((t) => {
     const base = { click_id: t.clickId, type: t.type, ref: t.ref, touched_at: t.touchedAt, received_at: t.receivedAt };
     if (t.duplicate) {
-      return { ...base, outcome: "duplicate", reason: `click_id ${t.clickId} repetido; só o primeiro registro conta` };
+      return { ...base, outcome: "duplicate", reason: duplicateReason(t.clickId, t.canonical ?? undefined, t) };
     }
     const reason = t.touchedAt > signedUpAt
       ? `link aberto depois do cadastro (toque ${t.touchedAt} posterior a ${signedUpAt}); não conta`
@@ -112,8 +112,12 @@ export function createApp({ db, clock, windowDays }: AppDeps): Hono {
     if (getFirstOpen(db, deviceId) === null) throw new HttpError(404, "Dispositivo sem primeira abertura registrada.");
     // Depois do cadastro o toque é aceito e só vai para a auditoria; a decisão gravada não muda.
     const late = getSignupByDevice(db, deviceId) !== null;
-    const isNew = recordTouch(db, deviceId, storedTouch(link, touchedAt), toIso(clock()), late);
-    return c.json({ device_id: deviceId, click_id: link.clickId, duplicate: !isNew }, isNew ? 201 : 200);
+    const result = recordTouch(db, deviceId, storedTouch(link, touchedAt), toIso(clock()), late);
+    if (result === "replaced") {
+      // Repetição mais antiga que passou a ser o registro canônico do click_id.
+      return c.json({ device_id: deviceId, click_id: link.clickId, duplicate: false, replaced_canonical: true }, 200);
+    }
+    return c.json({ device_id: deviceId, click_id: link.clickId, duplicate: result === "duplicate" }, result === "new" ? 201 : 200);
   });
 
   app.post("/signups", async (c) => {

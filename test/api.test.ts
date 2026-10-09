@@ -301,3 +301,117 @@ describe("toques recebidos depois do cadastro", () => {
     expect(await tardios()).toEqual([]);
   });
 });
+
+describe("clique repetido: vale o touched_at mais antigo", () => {
+  const X = (ref = "verao26") => camp("x", ref);
+  const eventos = [
+    { id: "X5", at: OPEN + 4 * DAY_MS, link: camp("x") },
+    { id: "X2", at: OPEN + 1 * DAY_MS, link: camp("x") },
+    { id: "Y4", at: OPEN + 3 * DAY_MS, link: indic("y") },
+  ];
+
+  async function rodar(ordem: string[]) {
+    app = createApp({ db: openDb(":memory:"), clock: () => now, windowDays: 7 });
+    await openApp("d1", OPEN);
+    for (const id of ordem) {
+      const e = eventos.find((x) => x.id === id)!;
+      await touch("d1", e.at, e.link);
+    }
+    await signup("d1", "u1", OPEN + 5 * DAY_MS);
+    return (await audit("u1")).body;
+  }
+
+  it("as mesmas três chegadas em ordens diferentes dão o mesmo vencedor e a mesma auditoria", async () => {
+    const a = await rodar(["X5", "X2", "Y4"]);
+    const b = await rodar(["X2", "X5", "Y4"]);
+    const c = await rodar(["Y4", "X5", "X2"]);
+    for (const r of [a, b, c]) {
+      expect(r.attribution).toMatchObject({ source: "referral", click_id: "y" });
+      expect(r.touches.map((t: any) => [t.click_id, t.touched_at, t.outcome])).toEqual([
+        ["x", at(OPEN + DAY_MS), "lost_to_later_touch"],
+        ["y", at(OPEN + 3 * DAY_MS), "winner"],
+        ["x", at(OPEN + 4 * DAY_MS), "duplicate"],
+      ]);
+    }
+  });
+
+  it("duplicado mais antigo que chega depois vira o canônico (200, duplicate false)", async () => {
+    await openApp("d1", OPEN);
+    expect((await touch("d1", OPEN + 4 * DAY_MS, X())).status).toBe(201);
+    const r = await touch("d1", OPEN + DAY_MS, X());
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ duplicate: false, replaced_canonical: true });
+    const mais_novo = await touch("d1", OPEN + 6 * DAY_MS, X());
+    expect(mais_novo.body).toMatchObject({ duplicate: true });
+  });
+
+  it("depois do cadastro o repetido mais antigo não troca a decisão gravada", async () => {
+    await openApp("d1", OPEN);
+    await touch("d1", OPEN + 4 * DAY_MS, X());
+    await signup("d1", "u1", OPEN + 5 * DAY_MS);
+    const antes = (await audit("u1")).body;
+    const r = await touch("d1", OPEN + DAY_MS, X());
+    expect(r.body.duplicate).toBe(true);
+    const depois = (await audit("u1")).body;
+    expect(depois.attribution).toEqual(antes.attribution);
+    expect(depois.touches.slice(0, 1)).toEqual(antes.touches);
+    expect(depois.touches[1]).toMatchObject({ outcome: "duplicate", touched_at: at(OPEN + DAY_MS) });
+  });
+
+  it("repetição com type ou ref diferentes continua duplicate e o reason cita a divergência", async () => {
+    await openApp("d1", OPEN);
+    await touch("d1", OPEN + DAY_MS, camp("x", "verao26"));
+    await touch("d1", OPEN + 2 * DAY_MS, indic("x", "ana_k3"));
+    await touch("d1", OPEN + 3 * DAY_MS, camp("x", "outra"));
+    await touch("d1", OPEN + 4 * DAY_MS, camp("x", "verao26")); // igual ao canônico
+    await signup("d1", "u1", OPEN + 5 * DAY_MS);
+    const dups = (await audit("u1")).body.touches.filter((t: any) => t.outcome === "duplicate");
+    expect(dups).toHaveLength(3);
+    expect(dups[0].reason).toMatch(/type\/ref divergiu/);
+    expect(dups[1].reason).toMatch(/type\/ref divergiu/);
+    expect(dups[2].reason).not.toMatch(/divergiu/);
+  });
+
+  it("repetição divergente depois do cadastro também cita a divergência", async () => {
+    await openApp("d1", OPEN, camp("x", "verao26"));
+    await signup("d1", "u1", OPEN + DAY_MS);
+    await touch("d1", OPEN + 2 * DAY_MS, indic("x", "ana_k3"));
+    const t = (await audit("u1")).body.touches.find((x: any) => x.outcome === "duplicate");
+    expect(t.reason).toMatch(/type\/ref divergiu/);
+  });
+});
+
+describe("abertura atrasada recua o first_open_at", () => {
+  it("antes do cadastro: vale o menor opened_at, a janela acompanha e o toque antes inválido passa a valer", async () => {
+    await openApp("d1", OPEN + DAY_MS);
+    await touch("d1", OPEN, camp("c1"));          // era before_first_open
+    await touch("d1", OPEN + 8 * DAY_MS, indic("r1")); // valeria na janela antiga (fim OPEN+8d)
+    const r = await openApp("d1", OPEN);
+    expect(r.status).toBe(200);
+    expect(r.body.first_open_at).toBe(at(OPEN));
+    await signup("d1", "u1", OPEN + 20 * DAY_MS);
+    const a = (await audit("u1")).body;
+    expect(a.window).toMatchObject({ first_open_at: at(OPEN), ends_at: at(OPEN + 7 * DAY_MS) });
+    expect(a.touches.map((t: any) => [t.click_id, t.outcome])).toEqual([
+      ["c1", "winner"],
+      ["r1", "outside_window"],
+    ]);
+  });
+
+  it("abertura posterior ao first_open_at não o avança", async () => {
+    await openApp("d1", OPEN);
+    const r = await openApp("d1", OPEN + DAY_MS);
+    expect(r.body.first_open_at).toBe(at(OPEN));
+  });
+
+  it("depois do cadastro a decisão e a janela gravadas não mudam", async () => {
+    await openApp("d1", OPEN + DAY_MS, camp("c1"));
+    await signup("d1", "u1", OPEN + 2 * DAY_MS);
+    const antes = (await audit("u1")).body;
+    const r = await openApp("d1", OPEN);
+    expect(r.body.first_open_at).toBe(at(OPEN + DAY_MS));
+    const depois = (await audit("u1")).body;
+    expect(depois.window).toEqual(antes.window);
+    expect(depois.attribution).toEqual(antes.attribution);
+  });
+});

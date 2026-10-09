@@ -82,23 +82,42 @@ export function insertDevice(db: Db, deviceId: string, firstOpenAt: string): voi
   db.prepare("INSERT INTO devices (device_id, first_open_at) VALUES (?, ?)").run(deviceId, firstOpenAt);
 }
 
+export type RecordResult = "new" | "duplicate" | "replaced";
+
 /**
- * Devolve true se o toque é novo, false se o click_id já existia (guardado como duplicado).
- * `late` marca toque recebido depois do cadastro do dispositivo (não entra na decisão).
+ * Registra o toque. Um click_id tem um único registro canônico por dispositivo: o de
+ * `touched_at` mais antigo, qualquer que seja a ordem de chegada. Um repetido mais antigo
+ * que chega depois toma o lugar do canônico ("replaced") e o antigo canônico vira duplicado.
+ * `late` marca toque recebido depois do cadastro (não entra na decisão); um tardio nunca
+ * substitui um canônico anterior ao cadastro, porque a decisão gravada é imutável.
  */
-export function recordTouch(db: Db, deviceId: string, t: StoredTouch, receivedAt: string, late: boolean): boolean {
-  const res = db
-    .prepare("INSERT OR IGNORE INTO touches (device_id, click_id, type, ref, touched_at, received_at, late) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .run(deviceId, t.clickId, t.type, t.ref, t.touchedAt, receivedAt, late ? 1 : 0);
-  if (Number(res.changes) === 1) return true;
-  db.prepare("INSERT INTO duplicate_touches (device_id, click_id, type, ref, touched_at, received_at, late) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .run(deviceId, t.clickId, t.type, t.ref, t.touchedAt, receivedAt, late ? 1 : 0);
-  return false;
+export function recordTouch(db: Db, deviceId: string, t: StoredTouch, receivedAt: string, late: boolean): RecordResult {
+  const lateInt = late ? 1 : 0;
+  const insertDup = (x: StoredTouch, rec: string, l: number) =>
+    db.prepare("INSERT INTO duplicate_touches (device_id, click_id, type, ref, touched_at, received_at, late) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(deviceId, x.clickId, x.type, x.ref, x.touchedAt, rec, l);
+  const existing = db.prepare("SELECT type, ref, touched_at, received_at, late FROM touches WHERE device_id = ? AND click_id = ?")
+    .get(deviceId, t.clickId) as { type: TouchType; ref: string; touched_at: string; received_at: string; late: number } | undefined;
+  if (!existing) {
+    db.prepare("INSERT INTO touches (device_id, click_id, type, ref, touched_at, received_at, late) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(deviceId, t.clickId, t.type, t.ref, t.touchedAt, receivedAt, lateInt);
+    return "new";
+  }
+  if (existing.late === lateInt && t.touchedAt < existing.touched_at) {
+    db.prepare("UPDATE touches SET type = ?, ref = ?, touched_at = ?, received_at = ? WHERE device_id = ? AND click_id = ?")
+      .run(t.type, t.ref, t.touchedAt, receivedAt, deviceId, t.clickId);
+    insertDup({ clickId: t.clickId, type: existing.type, ref: existing.ref, touchedAt: existing.touched_at }, existing.received_at, existing.late);
+    return "replaced";
+  }
+  insertDup(t, receivedAt, lateInt);
+  return "duplicate";
 }
 
 export interface LateTouch extends StoredTouch {
   receivedAt: string;
   duplicate: boolean;
+  canonical: { type: TouchType; ref: string } | null; // só para duplicados
+
 }
 
 interface TouchRow { click_id: string; type: TouchType; ref: string; touched_at: string; received_at: string }
@@ -113,8 +132,11 @@ export function listTouches(db: Db, deviceId: string): { canonical: StoredTouch[
 /** Toques recebidos depois do cadastro (novos e repetições), na ordem de recebimento. */
 export function listLateTouches(db: Db, deviceId: string): LateTouch[] {
   const q = (t: string, duplicate: boolean) =>
-    (db.prepare(`SELECT id, click_id, type, ref, touched_at, received_at FROM ${t} WHERE device_id = ? AND late = 1 ORDER BY id`).all(deviceId) as unknown as (TouchRow & { id: number })[])
-      .map((r) => ({ ...toStored(r), receivedAt: r.received_at, duplicate, id: r.id }));
+    (db.prepare(`SELECT d.id, d.click_id, d.type, d.ref, d.touched_at, d.received_at,
+        (SELECT c.type FROM touches c WHERE c.device_id = d.device_id AND c.click_id = d.click_id) AS c_type,
+        (SELECT c.ref FROM touches c WHERE c.device_id = d.device_id AND c.click_id = d.click_id) AS c_ref
+        FROM ${t} d WHERE d.device_id = ? AND d.late = 1 ORDER BY d.id`).all(deviceId) as unknown as (TouchRow & { id: number; c_type: TouchType; c_ref: string })[])
+      .map((r) => ({ ...toStored(r), receivedAt: r.received_at, duplicate, canonical: duplicate ? { type: r.c_type, ref: r.c_ref } : null, id: r.id }));
   return [...q("touches", false), ...q("duplicate_touches", true)]
     .sort((a, b) => (a.receivedAt < b.receivedAt ? -1 : a.receivedAt > b.receivedAt ? 1 : a.id - b.id))
     .map(({ id: _id, ...rest }) => rest);
