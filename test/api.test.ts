@@ -415,3 +415,66 @@ describe("abertura atrasada recua o first_open_at", () => {
     expect(depois.attribution).toEqual(antes.attribution);
   });
 });
+
+describe("repetições empatadas no mesmo touched_at (desempate total)", () => {
+  type Ev = { link: string };
+  const permutacoes = <T>(xs: T[]): T[][] =>
+    xs.length <= 1 ? [xs] : xs.flatMap((x, i) => permutacoes([...xs.slice(0, i), ...xs.slice(i + 1)]).map((p) => [x, ...p]));
+
+  async function rodarTodas(eventos: Ev[]) {
+    const saidas: any[] = [];
+    for (const ordem of permutacoes(eventos)) {
+      app = createApp({ db: openDb(":memory:"), clock: () => now, windowDays: 7 });
+      await openApp("d1", OPEN);
+      for (const e of ordem) await touch("d1", OPEN + DAY_MS, e.link);
+      await signup("d1", "u1", OPEN + 2 * DAY_MS);
+      saidas.push((await audit("u1")).body);
+    }
+    return saidas;
+  }
+  const mesmo = (saidas: any[]) => { for (const s of saidas) expect(s).toEqual(saidas[0]); };
+
+  it("mesmo click_id como referral/r1 e campaign/r2: vence referral em qualquer ordem", async () => {
+    const saidas = await rodarTodas([{ link: indic("b", "r1") }, { link: camp("b", "r2") }]);
+    mesmo(saidas);
+    expect(saidas[0].attribution).toMatchObject({ source: "referral", ref: "r1", click_id: "b" });
+    const dup = saidas[0].touches.find((t: any) => t.outcome === "duplicate");
+    expect(dup).toMatchObject({ type: "campaign", ref: "r2" });
+    expect(dup.reason).toMatch(/divergiu/);
+  });
+
+  it("mesmo type e refs diferentes: vence o ref lexicograficamente menor em qualquer ordem", async () => {
+    const saidas = await rodarTodas([{ link: camp("b", "zeta") }, { link: camp("b", "alfa") }]);
+    mesmo(saidas);
+    expect(saidas[0].attribution).toMatchObject({ ref: "alfa" });
+  });
+
+  it("três repetições empatadas, em todas as 6 ordens, dão a mesma decisão e a mesma auditoria", async () => {
+    const saidas = await rodarTodas([
+      { link: camp("b", "m") }, { link: indic("b", "z") }, { link: indic("b", "k") },
+    ]);
+    expect(saidas).toHaveLength(6);
+    mesmo(saidas);
+    expect(saidas[0].attribution).toMatchObject({ source: "referral", ref: "k" });
+    expect(saidas[0].touches.filter((t: any) => t.outcome === "duplicate")).toHaveLength(2);
+  });
+});
+
+describe("ordem dos toques tardios na auditoria", () => {
+  it("segue a ordem de recebimento, não o touched_at nem o id invertido", async () => {
+    await openApp("d1", OPEN);
+    await signup("d1", "u1", OPEN + DAY_MS);
+    now = Date.UTC(2026, 5, 10, 1);
+    await touch("d1", OPEN + 9 * DAY_MS, camp("t1"));
+    now = Date.UTC(2026, 5, 10, 2);
+    await touch("d1", OPEN + 5 * DAY_MS, camp("t2"));
+    now = Date.UTC(2026, 5, 10, 3);
+    await touch("d1", OPEN + 7 * DAY_MS, camp("t3"));
+    now = Date.UTC(2026, 5, 10, 4);
+    await touch("d1", OPEN + 10 * DAY_MS, camp("t1")); // repetição também entra na ordem de recebimento
+    const late = (await audit("u1")).body.touches.filter((t: any) => t.received_at);
+    expect(late.map((t: any) => [t.click_id, t.outcome])).toEqual([
+      ["t1", "received_after_signup"], ["t2", "received_after_signup"], ["t3", "received_after_signup"], ["t1", "duplicate"],
+    ]);
+  });
+});
