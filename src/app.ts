@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { decideAttribution, duplicateReason, type Decision, type TouchInput } from "./attribution.ts";
 import {
-  getFirstOpen, getSignup, listLateTouches, getSignupByDevice, insertDevice, insertSignup, listTouches, recordTouch,
+  getFirstOpen, getSignup, listLateTouches, getSignupByDevice, insertDevice, insertSignup, listTouches, recordTouch, updateFirstOpen,
   type Db, type LateTouch, type StoredTouch,
 } from "./db.ts";
 import { parseLink, type ParsedLink } from "./link.ts";
@@ -98,10 +98,19 @@ export function createApp({ db, clock, windowDays }: AppDeps): Hono {
     const link = optionalLink(body, false);
     const existing = getFirstOpen(db, deviceId);
     const late = link !== null && getSignupByDevice(db, deviceId) !== null;
-    if (existing === null) insertDevice(db, deviceId, toIso(openedAt));
+    let firstOpenAt = existing;
+    if (existing === null) {
+      insertDevice(db, deviceId, toIso(openedAt));
+      firstOpenAt = toIso(openedAt);
+    } else if (openedAt < Date.parse(existing) && !late && !getSignupByDevice(db, deviceId)) {
+      // Abertura atrasada e mais antiga: antes do cadastro, first_open_at recua e a janela acompanha.
+      // Depois do cadastro a decisão gravada não muda, então o valor guardado fica como está.
+      updateFirstOpen(db, deviceId, toIso(openedAt));
+      firstOpenAt = toIso(openedAt);
+    }
     // O clique que abriu o app vale como toque no horário da abertura.
     if (link) recordTouch(db, deviceId, storedTouch(link, openedAt), toIso(clock()), late);
-    return c.json({ device_id: deviceId, first_open_at: existing ?? toIso(openedAt) }, existing === null ? 201 : 200);
+    return c.json({ device_id: deviceId, first_open_at: firstOpenAt }, existing === null ? 201 : 200);
   });
 
   app.post("/touches", async (c) => {

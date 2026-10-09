@@ -155,3 +155,7 @@ export function insertSignup(db: Db, s: StoredSignup): void {
     "INSERT INTO signups (user_id, device_id, signed_up_at, recorded_at, source, ref, click_id, reason, audit_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
   ).run(s.user_id, s.device_id, s.signed_up_at, s.recorded_at, s.source, s.ref, s.click_id, s.reason, s.audit_json);
 }
+
+export function updateFirstOpen(db: Db, deviceId: string, firstOpenAt: string): void {
+  db.prepare("UPDATE devices SET first_open_at = ? WHERE device_id = ?").run(firstOpenAt, deviceId);
+}
