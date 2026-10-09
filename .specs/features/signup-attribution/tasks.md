@@ -13,4 +13,6 @@ Status: Concluído
 | T7 | `index.ts`, `.env.example` | T6 | subida real + curl | [x] |
 | T8 | README | T7 | exemplos rodados com curl | [x] |
 | T10 | Ajuste do autor: toque tardio aceito e auditado (ATT-13/14), testes primeiro | T6 | `test/api.test.ts` bloco "toques recebidos depois do cadastro" | [x] |
+| T11 | Canônico por menor touched_at e reason de divergência type/ref (ATT-05) | T10 | bloco "clique repetido: vale o touched_at mais antigo" | [x] |
+| T12 | Abertura atrasada recua first_open_at (ATT-02); engines >=22.13 | T6 | bloco "abertura atrasada" | [x] |
 | T9 | Mutações de verificação | T6 | teste falha, desfeito | [x] |

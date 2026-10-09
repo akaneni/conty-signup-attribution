@@ -9,7 +9,7 @@ npm test
 npm run typecheck
 npm run dev        # PORT (padrão 3006), ATTRIBUTION_WINDOW_DAYS (padrão 7), DB_PATH (padrão: memória)
 ```
-Node 22+, Hono, `node:sqlite`, vitest.
+Node 22.13+ (`node:sqlite` sem flag), Hono, vitest. Só foi verificado no Node 24.
 
 ## Contrato do link
 `https://app.conty.example/o?t=<campaign|referral>&ref=<código>&cid=<click_id>`
@@ -20,7 +20,7 @@ Node 22+, Hono, `node:sqlite`, vitest.
 - Tudo viaja no link; nada depende de referrer (o webview não manda). O host não é verificado.
 
 ## Fluxo
-1. `POST /app-opens` `{ device_id, opened_at, link? }` grava `first_open_at` na primeira vez (aberturas repetidas mantêm o primeiro valor) e, se houver `link`, o toque no próprio `opened_at`. 201 na primeira, 200 nas seguintes.
+1. `POST /app-opens` `{ device_id, opened_at, link? }` grava `first_open_at` na primeira vez. Abertura repetida com `opened_at` mais antigo (abertura atrasada, ex.: app offline) **recua** o `first_open_at` para o menor valor, e a janela acompanha; isso só vale antes do cadastro, depois dele o valor e a decisão gravados não mudam. Abertura mais nova não altera nada e, se houver `link`, o toque no próprio `opened_at`. 201 na primeira, 200 nas seguintes.
 2. `POST /touches` `{ device_id, touched_at, link }` toques seguintes. Mesmo `click_id` no mesmo dispositivo responde 200 `{"duplicate": true}`. 404 se o dispositivo nunca abriu o app. Se o dispositivo já tem cadastro o toque é aceito (201, ou 200 se repetido), gravado com `received_at` e só aparece na auditoria; a decisão não muda (ver abaixo).
 3. `POST /signups` `{ device_id, user_id, signed_up_at }` decide a origem uma vez e grava. 201 na criação; repetir o mesmo corpo devolve 200 com o mesmo resultado (nada é recalculado). Mesmo `user_id` com outro dispositivo/horário, ou dispositivo de outro usuário: 409. Cadastro anterior à primeira abertura: 422.
 4. `GET /signups/:user_id/attribution` auditoria (snapshot gravado no momento da decisão).
@@ -37,7 +37,7 @@ Um toque é válido se `first_open_at <= touch_at <= min(signed_up_at, first_ope
 - **Janela: 7 dias** (`ATTRIBUTION_WINDOW_DAYS`), medidos da **primeira abertura** (não do clique), em múltiplos de 24 h (sem ajuste de horário de verão). Limite **inclusivo**: `first_open + 7d` vale; `first_open + 7d + 1 ms` é `outside_window`.
 - Toque depois do cadastro nunca conta (`after_signup`). Se o toque está depois do cadastro **e** depois da janela, a classificação é `after_signup` (checado primeiro). Toque antes da primeira abertura é `before_first_open`.
 - **Desempate de horário idêntico** (mesmo milissegundo): `referral` vence `campaign`; persistindo, vence o `click_id` menor (ordem lexicográfica). O perdedor é `lost_tie_break`. Quem tem horário anterior ao vencedor é `lost_to_later_touch`.
-- **Mesmo clique**: `UNIQUE(device_id, click_id)`. O primeiro registro a chegar é o canônico; as repetições ficam guardadas só para a auditoria (`duplicate`) e não geram outra origem.
+- **Mesmo clique**: um registro canônico por `(device_id, click_id)`: o de **`touched_at` mais antigo**, qualquer que seja a ordem de chegada. Se um repetido mais antigo chegar depois, ele vira o canônico (`POST /touches` responde 200 com `duplicate: false, replaced_canonical: true`) e o antigo vira `duplicate`. Depois do cadastro nada troca a decisão gravada. As repetições ficam só na auditoria (`duplicate`); se `type` ou `ref` divergirem do canônico, o `reason` diz isso. Não geram outra origem.
 - **Sem toque válido**: `source = "organic"` e `reason` gravado: `no_touches`, `all_outside_window`, `all_after_signup`, `all_before_first_open`, `no_valid_touches` (toques inválidos por motivos diferentes), `no_app_open` (dispositivo sem abertura registrada).
 
 ## Exemplo completo
@@ -57,7 +57,7 @@ Resposta da auditoria (abreviada; `touches` traz todos os toques, com `outcome` 
   "touches": [
     { "click_id": "clk_01H", "type": "campaign", "ref": "verao26", "touched_at": "2026-03-01T12:00:00.000Z", "outcome": "lost_to_later_touch", "reason": "válido, mas o toque clk_01J é mais recente (2026-03-03T12:00:00.000Z)" },
     { "click_id": "clk_01J", "type": "referral", "ref": "ana_k3", "touched_at": "2026-03-03T12:00:00.000Z", "outcome": "winner", "reason": "toque válido mais recente (2026-03-03T12:00:00.000Z)" },
-    { "click_id": "clk_01J", "type": "referral", "ref": "ana_k3", "touched_at": "2026-03-03T12:05:00.000Z", "outcome": "duplicate", "reason": "click_id clk_01J repetido; só o primeiro registro conta" }
+    { "click_id": "clk_01J", "type": "referral", "ref": "ana_k3", "touched_at": "2026-03-03T12:05:00.000Z", "outcome": "duplicate", "reason": "click_id clk_01J repetido; só o registro de touched_at mais antigo conta" }
   ]
 }
 ```
@@ -67,6 +67,7 @@ Valores de `outcome`: `winner`, `lost_to_later_touch`, `lost_tie_break`, `outsid
 
 ## Decisões adicionais
 - A decisão é imutável: toque recebido depois do cadastro é aceito e auditado, mas nunca reavalia nem troca o vencedor, mesmo se for mais recente ou de tipo com prioridade maior.
+- Duplicado que chega depois do cadastro nunca substitui um canônico anterior a ele (a decisão gravada é imutável).
 - Toque tardio não é avaliado contra a janela: só registramos que chegou e por quê não conta.
 - Cadastro de dispositivo sem abertura registrada não falha: vira `organic/no_app_open`.
 - Os toques ficam na auditoria ordenados por `touched_at`.
