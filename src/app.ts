@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { decideAttribution, type Decision, type TouchInput } from "./attribution.ts";
 import {
-  getFirstOpen, getSignup, getSignupByDevice, insertDevice, insertSignup, listTouches, recordTouch,
-  type Db, type StoredTouch,
+  getFirstOpen, getSignup, listLateTouches, getSignupByDevice, insertDevice, insertSignup, listTouches, recordTouch,
+  type Db, type LateTouch, type StoredTouch,
 } from "./db.ts";
 import { parseLink, type ParsedLink } from "./link.ts";
 import { parseInstant, toIso } from "./time.ts";
@@ -70,6 +70,19 @@ function auditTouches(d: Decision) {
   }));
 }
 
+function lateAudit(signedUpAt: string, late: LateTouch[]) {
+  return late.map((t) => {
+    const base = { click_id: t.clickId, type: t.type, ref: t.ref, touched_at: t.touchedAt, received_at: t.receivedAt };
+    if (t.duplicate) {
+      return { ...base, outcome: "duplicate", reason: `click_id ${t.clickId} repetido; só o primeiro registro conta` };
+    }
+    const reason = t.touchedAt > signedUpAt
+      ? `link aberto depois do cadastro (toque ${t.touchedAt} posterior a ${signedUpAt}); não conta`
+      : `toque anterior ao cadastro (${t.touchedAt}), mas recebido depois (${t.receivedAt}), por exemplo app offline; a decisão já estava gravada e não foi reavaliada`;
+    return { ...base, outcome: "received_after_signup", reason };
+  });
+}
+
 export function createApp({ db, clock, windowDays }: AppDeps): Hono {
   const app = new Hono();
 
@@ -84,10 +97,10 @@ export function createApp({ db, clock, windowDays }: AppDeps): Hono {
     const openedAt = instant(body, "opened_at");
     const link = optionalLink(body, false);
     const existing = getFirstOpen(db, deviceId);
-    if (link && getSignupByDevice(db, deviceId)) throw new HttpError(409, "Dispositivo já tem cadastro; a origem não muda mais.");
+    const late = link !== null && getSignupByDevice(db, deviceId) !== null;
     if (existing === null) insertDevice(db, deviceId, toIso(openedAt));
     // O clique que abriu o app vale como toque no horário da abertura.
-    if (link) recordTouch(db, deviceId, storedTouch(link, openedAt));
+    if (link) recordTouch(db, deviceId, storedTouch(link, openedAt), toIso(clock()), late);
     return c.json({ device_id: deviceId, first_open_at: existing ?? toIso(openedAt) }, existing === null ? 201 : 200);
   });
 
@@ -97,8 +110,9 @@ export function createApp({ db, clock, windowDays }: AppDeps): Hono {
     const touchedAt = instant(body, "touched_at");
     const link = optionalLink(body, true)!;
     if (getFirstOpen(db, deviceId) === null) throw new HttpError(404, "Dispositivo sem primeira abertura registrada.");
-    if (getSignupByDevice(db, deviceId)) throw new HttpError(409, "Dispositivo já tem cadastro; a origem não muda mais.");
-    const isNew = recordTouch(db, deviceId, storedTouch(link, touchedAt));
+    // Depois do cadastro o toque é aceito e só vai para a auditoria; a decisão gravada não muda.
+    const late = getSignupByDevice(db, deviceId) !== null;
+    const isNew = recordTouch(db, deviceId, storedTouch(link, touchedAt), toIso(clock()), late);
     return c.json({ device_id: deviceId, click_id: link.clickId, duplicate: !isNew }, isNew ? 201 : 200);
   });
 
@@ -153,12 +167,12 @@ export function createApp({ db, clock, windowDays }: AppDeps): Hono {
   app.get("/signups/:user_id/attribution", (c) => {
     const row = getSignup(db, c.req.param("user_id"));
     if (!row) throw new HttpError(404, "Cadastro não encontrado.");
-    const audit = JSON.parse(row.audit_json) as { window: unknown; touches: unknown };
+    const audit = JSON.parse(row.audit_json) as { window: unknown; touches: unknown[] };
     return c.json({
       user_id: row.user_id, device_id: row.device_id, signed_up_at: row.signed_up_at, recorded_at: row.recorded_at,
       attribution: { source: row.source, ref: row.ref, click_id: row.click_id, reason: row.reason },
       window: audit.window,
-      touches: audit.touches,
+      touches: [...audit.touches, ...lateAudit(row.signed_up_at, listLateTouches(db, row.device_id))],
     });
   });
 

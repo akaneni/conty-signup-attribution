@@ -87,11 +87,6 @@ describe("POST /touches", () => {
     expect((await audit("u2")).body.attribution.source).toBe("campaign");
   });
 
-  it("depois do cadastro do dispositivo dá 409", async () => {
-    await openApp("d1", OPEN);
-    await signup("d1", "u1", OPEN + DAY_MS);
-    expect((await touch("d1", OPEN + 2 * DAY_MS, camp("c1"))).status).toBe(409);
-  });
 });
 
 describe("POST /signups e GET /signups/:user_id/attribution", () => {
@@ -213,5 +208,96 @@ describe("POST /signups e GET /signups/:user_id/attribution", () => {
     await openApp("d1", OPEN);
     await signup("d1", "u1", OPEN + DAY_MS);
     expect((await audit("u1")).body.recorded_at).toBe(at(now));
+  });
+});
+
+describe("toques recebidos depois do cadastro", () => {
+  async function cadastrado() {
+    await openApp("d1", OPEN, camp("c1"));
+    const s = await signup("d1", "u1", OPEN + 2 * DAY_MS);
+    const antes = (await audit("u1")).body;
+    return { s, antes };
+  }
+  const tardios = async () =>
+    (await audit("u1")).body.touches.filter((t: any) => t.outcome === "received_after_signup" || t.received_at);
+
+  it("tipo (a): touched_at posterior ao cadastro é aceito (201), registrado e não conta", async () => {
+    const { antes } = await cadastrado();
+    now = Date.UTC(2026, 5, 2);
+    const r = await touch("d1", OPEN + 3 * DAY_MS, indic("r1"));
+    expect(r.status).toBe(201);
+    const a = (await audit("u1")).body;
+    const late = a.touches.find((t: any) => t.click_id === "r1");
+    expect(late).toMatchObject({
+      outcome: "received_after_signup", touched_at: at(OPEN + 3 * DAY_MS), received_at: at(now),
+    });
+    expect(late.reason).toMatch(/depois do cadastro/);
+    expect(late.reason).not.toMatch(/offline/);
+    expect(a.attribution).toEqual(antes.attribution);
+  });
+
+  it("tipo (b): touched_at anterior ao cadastro, recebido depois, tem motivo próprio e não reavalia", async () => {
+    const { antes } = await cadastrado();
+    now = Date.UTC(2026, 5, 3);
+    const r = await touch("d1", OPEN + DAY_MS, indic("r1"));
+    expect(r.status).toBe(201);
+    const a = (await audit("u1")).body;
+    const late = a.touches.find((t: any) => t.click_id === "r1");
+    expect(late).toMatchObject({
+      outcome: "received_after_signup", touched_at: at(OPEN + DAY_MS), received_at: at(now),
+    });
+    expect(late.reason).toMatch(/recebido depois/);
+    expect(late.reason).toMatch(/não foi reavaliada/);
+    expect(a.attribution).toEqual(antes.attribution);
+  });
+
+  it("decisão imutável: toque tardio mais recente e de prioridade maior não troca o vencedor", async () => {
+    const { s, antes } = await cadastrado();
+    await touch("d1", OPEN + 2 * DAY_MS, indic("r1")); // mesmo instante do cadastro, referral
+    await touch("d1", OPEN + 5 * DAY_MS, indic("r2"));
+    expect(s.body).toMatchObject({ source: "campaign", click_id: "c1" });
+    const a = (await audit("u1")).body;
+    expect(a.attribution).toEqual(antes.attribution);
+    expect(a.window).toEqual(antes.window);
+    expect(a.touches.slice(0, antes.touches.length)).toEqual(antes.touches);
+    expect(a.touches).toHaveLength(antes.touches.length + 2);
+    expect((await signup("d1", "u1", OPEN + 2 * DAY_MS)).body).toEqual(s.body);
+  });
+
+  it("clique repetido depois do cadastro continua deduplicado e aparece como duplicate", async () => {
+    await cadastrado();
+    now = Date.UTC(2026, 5, 4);
+    const dupDoAntigo = await touch("d1", OPEN + 3 * DAY_MS, camp("c1"));
+    expect(dupDoAntigo.status).toBe(200);
+    expect(dupDoAntigo.body.duplicate).toBe(true);
+    await touch("d1", OPEN + 3 * DAY_MS, indic("r1"));
+    expect((await touch("d1", OPEN + 4 * DAY_MS, indic("r1"))).status).toBe(200);
+    const a = (await audit("u1")).body;
+    const dups = a.touches.filter((t: any) => t.outcome === "duplicate" && t.received_at);
+    expect(dups.map((t: any) => t.click_id).sort()).toEqual(["c1", "r1"]);
+    expect(a.touches.filter((t: any) => t.outcome === "received_after_signup")).toHaveLength(1);
+    expect(a.attribution.click_id).toBe("c1");
+  });
+
+  it("abertura do app com link depois do cadastro: 200, toque registrado, first_open e decisão intactos", async () => {
+    const { antes } = await cadastrado();
+    now = Date.UTC(2026, 5, 5);
+    const r = await openApp("d1", OPEN + 4 * DAY_MS, indic("r1"));
+    expect(r.status).toBe(200);
+    expect(r.body.first_open_at).toBe(at(OPEN));
+    const a = (await audit("u1")).body;
+    expect(a.attribution).toEqual(antes.attribution);
+    expect(a.touches.find((t: any) => t.click_id === "r1")).toMatchObject({
+      outcome: "received_after_signup", received_at: at(now), touched_at: at(OPEN + 4 * DAY_MS),
+    });
+  });
+
+  it("os toques considerados na decisão original não ganham received_after_signup", async () => {
+    await openApp("d1", OPEN);
+    await touch("d1", OPEN + 3 * DAY_MS, indic("r1")); // enviado antes, touched_at pós-cadastro
+    await signup("d1", "u1", OPEN + 2 * DAY_MS);
+    const a = (await audit("u1")).body;
+    expect(a.touches.find((t: any) => t.click_id === "r1").outcome).toBe("after_signup");
+    expect(await tardios()).toEqual([]);
   });
 });

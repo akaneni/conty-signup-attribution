@@ -18,6 +18,8 @@ export function openDb(path = ":memory:"): Db {
       type TEXT NOT NULL,
       ref TEXT NOT NULL,
       touched_at TEXT NOT NULL,
+      received_at TEXT NOT NULL DEFAULT '',
+      late INTEGER NOT NULL DEFAULT 0, -- 1 = recebido depois do cadastro
       UNIQUE (device_id, click_id)
     );
     -- Repetições do mesmo click_id: guardadas só para a auditoria mostrar "duplicate".
@@ -27,7 +29,9 @@ export function openDb(path = ":memory:"): Db {
       click_id TEXT NOT NULL,
       type TEXT NOT NULL,
       ref TEXT NOT NULL,
-      touched_at TEXT NOT NULL
+      touched_at TEXT NOT NULL,
+      received_at TEXT NOT NULL DEFAULT '',
+      late INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS signups (
       user_id TEXT PRIMARY KEY,
@@ -41,6 +45,12 @@ export function openDb(path = ":memory:"): Db {
       audit_json TEXT NOT NULL
     );
   `);
+  // Bancos criados antes do campo received_at/late.
+  for (const table of ["touches", "duplicate_touches"]) {
+    for (const col of ["received_at TEXT NOT NULL DEFAULT ''", "late INTEGER NOT NULL DEFAULT 0"]) {
+      try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`); } catch { /* já existe */ }
+    }
+  }
   return db;
 }
 
@@ -72,24 +82,42 @@ export function insertDevice(db: Db, deviceId: string, firstOpenAt: string): voi
   db.prepare("INSERT INTO devices (device_id, first_open_at) VALUES (?, ?)").run(deviceId, firstOpenAt);
 }
 
-/** Devolve true se o toque é novo, false se o click_id já existia (guardado como duplicado). */
-export function recordTouch(db: Db, deviceId: string, t: StoredTouch): boolean {
+/**
+ * Devolve true se o toque é novo, false se o click_id já existia (guardado como duplicado).
+ * `late` marca toque recebido depois do cadastro do dispositivo (não entra na decisão).
+ */
+export function recordTouch(db: Db, deviceId: string, t: StoredTouch, receivedAt: string, late: boolean): boolean {
   const res = db
-    .prepare("INSERT OR IGNORE INTO touches (device_id, click_id, type, ref, touched_at) VALUES (?, ?, ?, ?, ?)")
-    .run(deviceId, t.clickId, t.type, t.ref, t.touchedAt);
+    .prepare("INSERT OR IGNORE INTO touches (device_id, click_id, type, ref, touched_at, received_at, late) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(deviceId, t.clickId, t.type, t.ref, t.touchedAt, receivedAt, late ? 1 : 0);
   if (Number(res.changes) === 1) return true;
-  db.prepare("INSERT INTO duplicate_touches (device_id, click_id, type, ref, touched_at) VALUES (?, ?, ?, ?, ?)")
-    .run(deviceId, t.clickId, t.type, t.ref, t.touchedAt);
+  db.prepare("INSERT INTO duplicate_touches (device_id, click_id, type, ref, touched_at, received_at, late) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(deviceId, t.clickId, t.type, t.ref, t.touchedAt, receivedAt, late ? 1 : 0);
   return false;
 }
 
-interface TouchRow { click_id: string; type: TouchType; ref: string; touched_at: string }
+export interface LateTouch extends StoredTouch {
+  receivedAt: string;
+  duplicate: boolean;
+}
+
+interface TouchRow { click_id: string; type: TouchType; ref: string; touched_at: string; received_at: string }
 const toStored = (r: TouchRow): StoredTouch => ({ clickId: r.click_id, type: r.type, ref: r.ref, touchedAt: r.touched_at });
 
+/** Toques usados na decisão: só os recebidos antes do cadastro. */
 export function listTouches(db: Db, deviceId: string): { canonical: StoredTouch[]; duplicates: StoredTouch[] } {
-  const canonical = db.prepare("SELECT click_id, type, ref, touched_at FROM touches WHERE device_id = ? ORDER BY id").all(deviceId) as unknown as TouchRow[];
-  const duplicates = db.prepare("SELECT click_id, type, ref, touched_at FROM duplicate_touches WHERE device_id = ? ORDER BY id").all(deviceId) as unknown as TouchRow[];
-  return { canonical: canonical.map(toStored), duplicates: duplicates.map(toStored) };
+  const q = (t: string) => db.prepare(`SELECT click_id, type, ref, touched_at, received_at FROM ${t} WHERE device_id = ? AND late = 0 ORDER BY id`).all(deviceId) as unknown as TouchRow[];
+  return { canonical: q("touches").map(toStored), duplicates: q("duplicate_touches").map(toStored) };
+}
+
+/** Toques recebidos depois do cadastro (novos e repetições), na ordem de recebimento. */
+export function listLateTouches(db: Db, deviceId: string): LateTouch[] {
+  const q = (t: string, duplicate: boolean) =>
+    (db.prepare(`SELECT id, click_id, type, ref, touched_at, received_at FROM ${t} WHERE device_id = ? AND late = 1 ORDER BY id`).all(deviceId) as unknown as (TouchRow & { id: number })[])
+      .map((r) => ({ ...toStored(r), receivedAt: r.received_at, duplicate, id: r.id }));
+  return [...q("touches", false), ...q("duplicate_touches", true)]
+    .sort((a, b) => (a.receivedAt < b.receivedAt ? -1 : a.receivedAt > b.receivedAt ? 1 : a.id - b.id))
+    .map(({ id: _id, ...rest }) => rest);
 }
 
 export function getSignup(db: Db, userId: string): StoredSignup | null {
