@@ -15,4 +15,5 @@ Status: Concluído
 | T10 | Ajuste do autor: toque tardio aceito e auditado (ATT-13/14), testes primeiro | T6 | `test/api.test.ts` bloco "toques recebidos depois do cadastro" | [x] |
 | T11 | Canônico por menor touched_at e reason de divergência type/ref (ATT-05) | T10 | bloco "clique repetido: vale o touched_at mais antigo" | [x] |
 | T12 | Abertura atrasada recua first_open_at (ATT-02); engines >=22.13 | T6 | bloco "abertura atrasada" | [x] |
+| T13 | Desempate total entre repetições, teste de permutação, ordem dos tardios, migração por PRAGMA, remoção do filtro redundante | T12 | `test/api.test.ts`, `test/db.test.ts` | [x] |
 | T9 | Mutações de verificação | T6 | teste falha, desfeito | [x] |
