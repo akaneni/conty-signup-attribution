@@ -21,9 +21,11 @@ Node 22+, Hono, `node:sqlite`, vitest.
 
 ## Fluxo
 1. `POST /app-opens` `{ device_id, opened_at, link? }` grava `first_open_at` na primeira vez (aberturas repetidas mantêm o primeiro valor) e, se houver `link`, o toque no próprio `opened_at`. 201 na primeira, 200 nas seguintes.
-2. `POST /touches` `{ device_id, touched_at, link }` toques seguintes. Mesmo `click_id` no mesmo dispositivo responde 200 `{"duplicate": true}`. 404 se o dispositivo nunca abriu o app; 409 se o dispositivo já tem cadastro.
+2. `POST /touches` `{ device_id, touched_at, link }` toques seguintes. Mesmo `click_id` no mesmo dispositivo responde 200 `{"duplicate": true}`. 404 se o dispositivo nunca abriu o app. Se o dispositivo já tem cadastro o toque é aceito (201, ou 200 se repetido), gravado com `received_at` e só aparece na auditoria; a decisão não muda (ver abaixo).
 3. `POST /signups` `{ device_id, user_id, signed_up_at }` decide a origem uma vez e grava. 201 na criação; repetir o mesmo corpo devolve 200 com o mesmo resultado (nada é recalculado). Mesmo `user_id` com outro dispositivo/horário, ou dispositivo de outro usuário: 409. Cadastro anterior à primeira abertura: 422.
 4. `GET /signups/:user_id/attribution` auditoria (snapshot gravado no momento da decisão).
+
+Toque que chega depois do cadastro (por `POST /touches` ou por `POST /app-opens` com link) nunca reavalia a decisão gravada.
 
 Todo horário exige fuso explícito (`Z` ou `±hh:mm`), precisão de ms; sem fuso é 400. Os horários vêm no payload (o relógio do servidor só carimba `recorded_at`).
 
@@ -59,15 +61,18 @@ Resposta da auditoria (abreviada; `touches` traz todos os toques, com `outcome` 
   ]
 }
 ```
-Valores de `outcome`: `winner`, `lost_to_later_touch`, `lost_tie_break`, `outside_window`, `after_signup`, `before_first_open`, `duplicate`.
+Toques recebidos depois do cadastro vêm no fim de `touches`, com `touched_at` e `received_at` (horário do servidor, relógio injetado) e `outcome: "received_after_signup"`; o `reason` distingue (a) link aberto depois do cadastro (`touched_at` posterior; não conta) e (b) toque anterior ao cadastro recebido tarde, por exemplo app offline (a decisão já estava gravada e não foi reavaliada). Repetição de `click_id` depois do cadastro aparece como `duplicate`, também com `received_at`. Os toques da decisão original não têm `received_at` e seguem como estavam, inclusive `after_signup` (toque enviado antes do cadastro com `touched_at` posterior).
+
+Valores de `outcome`: `winner`, `lost_to_later_touch`, `lost_tie_break`, `outside_window`, `after_signup`, `before_first_open`, `duplicate`, `received_after_signup` (só para toques recebidos após o cadastro).
 
 ## Decisões adicionais
-- A decisão é imutável: depois do cadastro, `POST /touches` do dispositivo dá 409 (não reescrevemos história). Toque com `touched_at` posterior ao cadastro mas enviado antes dele é aceito e aparece como `after_signup`.
+- A decisão é imutável: toque recebido depois do cadastro é aceito e auditado, mas nunca reavalia nem troca o vencedor, mesmo se for mais recente ou de tipo com prioridade maior.
+- Toque tardio não é avaliado contra a janela: só registramos que chegou e por quê não conta.
 - Cadastro de dispositivo sem abertura registrada não falha: vira `organic/no_app_open`.
 - Os toques ficam na auditoria ordenados por `touched_at`.
 
 ## Fora de escopo
-Assinatura/HMAC do link (qualquer um pode forjar um link), fraude de clique, vários dispositivos por usuário (um dispositivo por cadastro), redirecionador que gera o `cid`, autenticação da API.
+Reavaliar a atribuição quando chega toque tardio (b) com `touched_at` válido, assinatura/HMAC do link (qualquer um pode forjar um link), fraude de clique, vários dispositivos por usuário (um dispositivo por cadastro), redirecionador que gera o `cid`, autenticação da API.
 
 ## Uso de IA
 - **Feito com IA:** especificação, código e testes escritos com Claude Code (Claude Sonnet 5.5), a partir de decisões do autor tomadas em entrevista (grill) e registradas em `.specs/`.

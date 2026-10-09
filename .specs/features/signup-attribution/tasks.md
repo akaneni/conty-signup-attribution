@@ -12,4 +12,5 @@ Status: Concluído
 | T6 | `app.ts` + testes de API primeiro | T5 | `test/api.test.ts` | [x] |
 | T7 | `index.ts`, `.env.example` | T6 | subida real + curl | [x] |
 | T8 | README | T7 | exemplos rodados com curl | [x] |
+| T10 | Ajuste do autor: toque tardio aceito e auditado (ATT-13/14), testes primeiro | T6 | `test/api.test.ts` bloco "toques recebidos depois do cadastro" | [x] |
 | T9 | Mutações de verificação | T6 | teste falha, desfeito | [x] |

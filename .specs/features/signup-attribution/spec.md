@@ -36,7 +36,8 @@ A Conty investe em convite, comunidade e campanha. Sem origem confiável do cada
 | ATT-10 | WHEN o cadastro se repete (mesmo user_id e mesmo corpo) THEN SHALL devolver a mesma decisão sem recalcular; corpo divergente SHALL dar 409 | idempotência |
 | ATT-11 | WHEN se consulta `GET /signups/:user_id/attribution` THEN SHALL listar TODOS os toques com `outcome` e `reason` e a janela usada | auditoria |
 | ATT-12 | WHEN um horário vem sem fuso explícito THEN SHALL dar 400 | datas com fuso |
-| ATT-13 | WHEN chega toque de dispositivo com cadastro já feito THEN SHALL dar 409 (a decisão é imutável) | consistência |
+| ATT-13 | WHEN chega toque (`/touches` ou `/app-opens` com link) de dispositivo com cadastro já feito THEN SHALL aceitar (201; 200 se repetido), gravar `received_at` e NÃO reavaliar a decisão | consistência |
+| ATT-14 | WHEN a auditoria é consultada THEN SHALL listar esses toques com `outcome: received_after_signup` (ou `duplicate`), `touched_at`, `received_at` e `reason` distinguindo (a) `touched_at` posterior ao cadastro e (b) anterior mas recebido tarde | auditoria |
 
 ## Critérios de aceite
 Cada ID acima tem ao menos um teste em `test/` (ver tabela no README).
