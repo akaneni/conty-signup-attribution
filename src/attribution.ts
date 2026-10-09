@@ -60,6 +60,19 @@ export function duplicateReason(clickId: string, canonical: { type: string; ref:
   return base;
 }
 
+/**
+ * Desempate TOTAL entre registros do mesmo click_id: negativo se `a` deve ser o canônico.
+ * touched_at mais antigo; empate: referral antes de campaign; empate: ref lexicográfico menor.
+ */
+export function compareRepeats(
+  a: { touchedAt: number; type: TouchType; ref: string },
+  b: { touchedAt: number; type: TouchType; ref: string },
+): number {
+  if (a.touchedAt !== b.touchedAt) return a.touchedAt - b.touchedAt;
+  if (a.type !== b.type) return TYPE_RANK[b.type] - TYPE_RANK[a.type];
+  return a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0;
+}
+
 const iso = (ms: number) => new Date(ms).toISOString();
 
 // Ordem de preferência entre toques válidos: mais recente, depois tipo, depois click_id menor.
@@ -71,7 +84,12 @@ function compareValid(a: TouchInput, b: TouchInput): number {
 
 export function decideAttribution(input: DecideInput): Decision {
   const { firstOpenAt, signedUpAt, windowDays } = input;
-  const ordered = [...input.touches].sort((a, b) => a.touchedAt - b.touchedAt || (a.clickId < b.clickId ? -1 : 1));
+  // Ordem total e independente da chegada: horário, click_id, canônico antes dos repetidos, depois o critério dos repetidos.
+  const ordered = [...input.touches].sort((a, b) =>
+    a.touchedAt - b.touchedAt ||
+    (a.clickId < b.clickId ? -1 : a.clickId > b.clickId ? 1 : 0) ||
+    Number(a.duplicate) - Number(b.duplicate) ||
+    compareRepeats(a, b));
 
   if (firstOpenAt === null) {
     return {

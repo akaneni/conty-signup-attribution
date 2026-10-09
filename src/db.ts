@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { compareRepeats } from "./attribution.ts";
 import type { TouchType } from "./link.ts";
 
 export type Db = DatabaseSync;
@@ -45,11 +46,11 @@ export function openDb(path = ":memory:"): Db {
       audit_json TEXT NOT NULL
     );
   `);
-  // Bancos criados antes do campo received_at/late.
+  // Bancos criados antes de received_at/late: acrescenta só o que falta; qualquer erro sobe.
   for (const table of ["touches", "duplicate_touches"]) {
-    for (const col of ["received_at TEXT NOT NULL DEFAULT ''", "late INTEGER NOT NULL DEFAULT 0"]) {
-      try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`); } catch { /* já existe */ }
-    }
+    const have = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name));
+    if (!have.has("received_at")) db.exec(`ALTER TABLE ${table} ADD COLUMN received_at TEXT NOT NULL DEFAULT ''`);
+    if (!have.has("late")) db.exec(`ALTER TABLE ${table} ADD COLUMN late INTEGER NOT NULL DEFAULT 0`);
   }
   return db;
 }
@@ -103,7 +104,11 @@ export function recordTouch(db: Db, deviceId: string, t: StoredTouch, receivedAt
       .run(deviceId, t.clickId, t.type, t.ref, t.touchedAt, receivedAt, lateInt);
     return "new";
   }
-  if (existing.late === lateInt && t.touchedAt < existing.touched_at) {
+  const novoVence = compareRepeats(
+    { touchedAt: Date.parse(t.touchedAt), type: t.type, ref: t.ref },
+    { touchedAt: Date.parse(existing.touched_at), type: existing.type, ref: existing.ref },
+  ) < 0;
+  if (existing.late === lateInt && novoVence) {
     db.prepare("UPDATE touches SET type = ?, ref = ?, touched_at = ?, received_at = ? WHERE device_id = ? AND click_id = ?")
       .run(t.type, t.ref, t.touchedAt, receivedAt, deviceId, t.clickId);
     insertDup({ clickId: t.clickId, type: existing.type, ref: existing.ref, touchedAt: existing.touched_at }, existing.received_at, existing.late);
@@ -123,9 +128,9 @@ export interface LateTouch extends StoredTouch {
 interface TouchRow { click_id: string; type: TouchType; ref: string; touched_at: string; received_at: string }
 const toStored = (r: TouchRow): StoredTouch => ({ clickId: r.click_id, type: r.type, ref: r.ref, touchedAt: r.touched_at });
 
-/** Toques usados na decisão: só os recebidos antes do cadastro. */
+/** Toques usados na decisão. Chamada só ao cadastrar, quando ainda não existe toque tardio. */
 export function listTouches(db: Db, deviceId: string): { canonical: StoredTouch[]; duplicates: StoredTouch[] } {
-  const q = (t: string) => db.prepare(`SELECT click_id, type, ref, touched_at, received_at FROM ${t} WHERE device_id = ? AND late = 0 ORDER BY id`).all(deviceId) as unknown as TouchRow[];
+  const q = (t: string) => db.prepare(`SELECT click_id, type, ref, touched_at, received_at FROM ${t} WHERE device_id = ? ORDER BY id`).all(deviceId) as unknown as TouchRow[];
   return { canonical: q("touches").map(toStored), duplicates: q("duplicate_touches").map(toStored) };
 }
 
@@ -138,7 +143,7 @@ export function listLateTouches(db: Db, deviceId: string): LateTouch[] {
         FROM ${t} d WHERE d.device_id = ? AND d.late = 1 ORDER BY d.id`).all(deviceId) as unknown as (TouchRow & { id: number; c_type: TouchType; c_ref: string })[])
       .map((r) => ({ ...toStored(r), receivedAt: r.received_at, duplicate, canonical: duplicate ? { type: r.c_type, ref: r.c_ref } : null, id: r.id }));
   return [...q("touches", false), ...q("duplicate_touches", true)]
-    .sort((a, b) => (a.receivedAt < b.receivedAt ? -1 : a.receivedAt > b.receivedAt ? 1 : a.id - b.id))
+    .sort((a, b) => (a.receivedAt < b.receivedAt ? -1 : a.receivedAt > b.receivedAt ? 1 : Number(a.duplicate) - Number(b.duplicate) || a.id - b.id))
     .map(({ id: _id, ...rest }) => rest);
 }
 
