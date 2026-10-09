@@ -54,6 +54,14 @@ describe("POST /app-opens", () => {
     expect((await openApp("d1", OPEN)).status).toBe(201);
   });
 
+  it("rejeita horário com componente fora da faixa (T24:00:00Z, +24:00) com 400", async () => {
+    for (const opened_at of ["2026-03-01T24:00:00Z", "2026-03-01T12:00:00+24:00", "2027-02-29T12:00:00Z"]) {
+      const r = await call("POST", "/app-opens", { device_id: "d1", opened_at });
+      expect(r.status).toBe(400);
+      expect(r.body.error).toMatch(/fuso explícito/);
+    }
+  });
+
   it("rejeita horário sem fuso, link malformado e corpo sem device_id com 400", async () => {
     expect((await call("POST", "/app-opens", { device_id: "d1", opened_at: "2026-03-01T12:00:00" })).status).toBe(400);
     expect((await call("POST", "/app-opens", { device_id: "d1", opened_at: at(OPEN), link: "https://x.test/o?t=zzz" })).status).toBe(400);

@@ -27,7 +27,7 @@ Node 22.13+ (`node:sqlite` sem flag), Hono, vitest. Só foi verificado no Node 2
 
 Toque que chega depois do cadastro (por `POST /touches` ou por `POST /app-opens` com link) nunca reavalia a decisão gravada.
 
-Todo horário exige fuso explícito (`Z` ou `±hh:mm`), precisão de ms; sem fuso é 400. Os horários vêm no payload (o relógio do servidor só carimba `recorded_at`).
+Todo horário exige fuso explícito (`Z`, `±hh:mm` ou `±hhmm`), precisão de ms (até 3 casas); sem fuso é 400. Cada componente é validado por faixa, sem rolar para o dia seguinte: ano 1000-9999, mês 1-12, dia existente no mês (bissexto incluso), hora 0-23 (`T24:00:00Z` é 400), minuto e segundo 0-59, fuso de -23:59 a +23:59 (`+24:00` e `+03:60` são 400). Os horários vêm no payload (o relógio do servidor só carimba `recorded_at`).
 
 ## Qual toque vence (last-touch) e por quê
 **Vence o último toque válido.** Escolhemos last-touch porque o link mais recente é a intenção mais próxima do cadastro, e porque é a regra mais simples de explicar e auditar (uma ordenação por horário).
